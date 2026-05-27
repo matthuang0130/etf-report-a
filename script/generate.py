@@ -2,43 +2,58 @@ import pandas as pd
 import os
 import glob
 
-# 設定路徑
-data_folder = 'data'
-template_path = 'templates/index.html'
-output_folder = 'dist'
-if not os.path.exists(output_folder): os.makedirs(output_folder)
+# 1. 欄位設定
+MAPPINGS = {
+    "統一": {"code": "股票代號", "name": "股票名稱", "qty": "持股張數"},
+    "00991A": {"code": "代碼", "name": "名稱", "qty": "持有張數"},
+    "00992A": {"code": "代碼", "name": "名稱", "qty": "持有張數"}
+}
 
-def get_html_item(row):
-    # 處理名稱和標籤
-    name = str(row['證券名稱'])
-    change = float(row['張數變動(張)'])
-    status = str(row['變動狀態'])
+def generate():
+    # 建立目錄
+    os.makedirs('data/history', exist_ok=True)
+    os.makedirs('dist', exist_ok=True)
     
-    css_class = "buy" if change > 0 else "sell"
-    change_text = f"+{int(change)}" if change > 0 else f"{int(change)}"
+    # 讀取所有目前的檔案
+    all_files = glob.glob(os.path.join('data', "*.csv"))
     
-    tag = ""
-    if "新" in status: tag = '<span class="tag">新</span>'
-    elif "出清" in status: tag = '<span class="tag">出清</span>'
+    # 依據檔名開頭 (如 00992A) 分組
+    groups = {}
+    for f in all_files:
+        key = os.path.basename(f).split('_')[0]
+        if key not in groups: groups[key] = []
+        groups[key].append(f)
     
-    return f'<div class="item"><span>{row["證券代號"]} {name}{tag}</span><span class="{css_class}">{change_text}</span></div>'
-
-# 讀取模板
-with open(template_path, 'r', encoding='utf-8') as f:
-    template = f.read()
-
-# 解析 Excel (假設 data 資料夾內有對應檔案)
-all_html = ""
-for file in glob.glob(os.path.join(data_folder, "*.xlsx")):
-    df = pd.read_excel(file)
-    etf_name = os.path.basename(file).split('_')[1]
+    final_report = ""
     
-    items = "".join([get_html_item(row) for _, row in df.iterrows()])
-    all_html += f'<div class="title">{etf_name}</div><div class="grid"><div class="box">{items}</div></div>'
+    for key, files in groups.items():
+        mapping = MAPPINGS.get(key, MAPPINGS["統一"])
+        
+        # 讀取並合併該組所有 CSV (例如群益的三個頁面)
+        df_list = [pd.read_csv(f) for f in files]
+        df_today = pd.concat(df_list)
+        df_today[mapping['qty']] = df_today[mapping['qty']].astype(str).str.replace(',', '').astype(float)
+        
+        # 比對邏輯：檢查歷史檔
+        history_path = f'data/history/{key}_last.csv'
+        if os.path.exists(history_path):
+            df_old = pd.read_csv(history_path)
+            merged = pd.merge(df_today, df_old, on=mapping['code'], how='outer', suffixes=('_now', '_old')).fillna(0)
+            merged['diff'] = merged[f"{mapping['qty']}_now"] - merged[f"{mapping['qty']}_old"]
+            
+            # 只篩選有異動的
+            changes = merged[merged['diff'] != 0]
+            for _, row in changes.iterrows():
+                css = "buy" if row['diff'] > 0 else "sell"
+                final_report += f'<div class="item"><span>{row[mapping["code"]]} {row[mapping["name"]+"_now"]}</span><span class="{css}">{int(row["diff"])}</span></div>'
+        
+        # 更新歷史檔
+        df_today.to_csv(history_path, index=False)
 
-# 生成最終頁面
-final_html = template.replace('<div id="content"></div>', all_html)
-with open(os.path.join(output_folder, 'index.html'), 'w', encoding='utf-8') as f:
-    f.write(final_html)
+    # 寫入 HTML (這裡會自動更新 dist/index.html)
+    with open('templates/index.html', 'r', encoding='utf-8') as f:
+        html = f.read().replace('<div id="content"></div>', final_report)
+    with open('dist/index.html', 'w', encoding='utf-8') as f:
+        f.write(html)
 
-print("自動轉換完成！")
+generate()
